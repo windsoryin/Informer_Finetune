@@ -438,7 +438,7 @@ class Dataset_Finetune(Dataset):
         df_raw = df_raw[['date'] + cols + [self.target]]
         # df_raw=df_raw.drop(df_raw.index[0:5933])
         # num_tune=5000
-        num_tune = int(len(df_raw) * 0.5)
+        num_tune = int(len(df_raw) * 0.8)
         num_tune_test = len(df_raw) - num_tune
 
         border1s = [0, num_tune - self.seq_len]
@@ -454,7 +454,7 @@ class Dataset_Finetune(Dataset):
 
         if self.scale:
             train_data = df_data[border1s[0]:border2s[0]]
-            self.scaler.fit(df_data.values)
+            self.scaler.fit(train_data.values)
             data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
@@ -491,7 +491,7 @@ class Dataset_Finetune(Dataset):
         if all(itr < rain_thresh for itr in trues):
             class_label = 1  # no rain : weight=1
         else:
-            class_label = 10  # rain: weight=4
+            class_label = 20  # rain: weight=4
 
         return seq_x, seq_y, seq_x_mark, seq_y_mark, class_label
 

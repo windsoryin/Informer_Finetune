@@ -7,7 +7,7 @@ from utils.metrics import metric, DTW, Temporal, Score
 
 import numpy as np
 
-import datetime
+from datetime import datetime
 
 import torch
 import torch.nn as nn
@@ -29,7 +29,8 @@ warnings.filterwarnings('ignore')
 class Exp_Informer(Exp_Basic):
     def __init__(self, args):
         super(Exp_Informer, self).__init__(args)
-    
+        self.writer = None
+
     def _build_model(self):
         model_dict = {
             'informer':Informer,
@@ -156,7 +157,7 @@ class Exp_Informer(Exp_Basic):
         # weighted MSE: no mean operation, return every element of minibatch
         return criterion
 
-    def vali(self, vali_data, vali_loader, criterion):
+    def vali(self, vali_data, vali_loader, criterion,itr=None,plot_flag=0):
         self.model.eval()
         total_loss = []
         preds=[]
@@ -180,12 +181,12 @@ class Exp_Informer(Exp_Basic):
                                  true.detach().cpu())  # to cpu due to no need to update parameter in validation
                 loss = loss.mean(dim=1)
                 loss = loss.mean(dim=1)
-                loss = loss.mean()
+                # loss = loss.mean()
 
                 # # weighted MSE loss
-                # weight = class_label.to(torch.device('cpu'))
-                # weighted_loss = weight * loss
-                # loss = weighted_loss.mean()
+                weight = class_label.to(torch.device('cpu'))
+                weighted_loss = weight * loss
+                loss = weighted_loss.mean()
             if (loss_type == 'dilate'):
                 alpha = 0.5
                 gamma = 0.001
@@ -222,14 +223,22 @@ class Exp_Informer(Exp_Basic):
         pred_plt = pred_plt.reshape(-1, 1)
         true_plt = trues[::trues.shape[-2], :, :]
         true_plt = true_plt.reshape(-1, 1)
-        fig = plt.figure(1, figsize=(8, 6))
+        fig,ax = plt.subplots(2,1,sharey='all', figsize=(18, 6),dpi=100)
         plt.subplot(211)
         plt.plot(pred_plt)
         plt.ylim(0,15)
         plt.subplot(212)
         plt.plot(true_plt)
-        plt.show()
-        self.writer.add_figure(tag='test prediction results', figure=fig)
+        plt.plot(pred_plt)
+
+        # plt.show()
+        # self.writer.
+        if plot_flag == 1:
+            if itr is not None:
+                self.writer.add_figure(tag='test prediction results', figure=fig,global_step=itr)
+            else:
+                self.writer.add_figure(tag='test prediction results', figure=fig)
+
         total_loss = np.average(total_loss)
         ts =  tp / (tp + fp + fn)
         far = 0 if (tp + fp)==0 else fp / (tp + fp)
@@ -459,9 +468,10 @@ class Exp_Informer(Exp_Basic):
     #23.08.28 ywj: fine tune
     def finetuen(self, setting,load=True):
         # tensorboard
-        log_name=''.join(['runs_FT/',setting,'/'])
+        TIMESTAMP = "{0:%Y-%m-%dT%H-%M-%S/}".format(datetime.now())
+        log_name=''.join(['runs_FT/',setting,'/',TIMESTAMP,'/'])
         self.writer = SummaryWriter(log_dir=log_name, comment='test_tensorboard')
-
+        
         tune_data, tune_loader = self._get_data(flag='tune') # get small sample data
         tune_test_data, tune_test_loader = self._get_data(flag='tune_test') # get fine tune test dataset
 
@@ -469,7 +479,8 @@ class Exp_Informer(Exp_Basic):
             path = os.path.join(self.args.checkpoints, setting)
             best_model_path = path + '/' + 'checkpoint.pth'
             self.model.load_state_dict(torch.load(best_model_path))
-        output =self.model.projection.weight.data
+
+        # output =self.model.projection.weight.data
         path = path + '/' + 'finetune' # set finetune path
         if not os.path.exists(path):
             os.makedirs(path)
@@ -485,6 +496,11 @@ class Exp_Informer(Exp_Basic):
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
+        # initial model results
+        train_loss, train_score = self.vali(tune_data, tune_loader, criterion,0,plot_flag=1)
+        test_loss, test_score = self.vali(tune_test_data, tune_test_loader, criterion,0,plot_flag=1)
+
+
 
         for epoch in range(self.args.train_epochs):
             iter_count = 0
@@ -559,16 +575,16 @@ class Exp_Informer(Exp_Basic):
             pred_plt=pred_plt.reshape(-1,1)
             true_plt=trues[::trues.shape[-2],:,:]
             true_plt=true_plt.reshape(-1,1)
-            fig= plt.figure(1,figsize=(8,6))
+            fig, ax = plt.subplots(2, 1, sharey='all', figsize=(18, 6), dpi=100)
             plt.subplot(211)
             plt.plot(pred_plt)
             plt.subplot(212)
             plt.plot(true_plt)
-            self.writer.add_figure(tag='prediction results',figure=fig)
+            self.writer.add_figure(tag='train prediction results',figure=fig,global_step=epoch)
 
             print("Epoch: {} cost time: {}".format(epoch + 1, time.time() - epoch_time))
             tune_loss = np.average(tune_loss)
-            test_loss, test_score = self.vali(tune_test_data, tune_test_loader, criterion)
+            test_loss, test_score = self.vali(tune_test_data, tune_test_loader, criterion,epoch+1,plot_flag=1)
 
             print("Epoch: {0}, Steps: {1} | Fine Tune Train Loss: {2:.7f} Fine Tune Test Loss: {3:.7f}".format(
                 epoch + 1, train_steps, tune_loss, test_loss))
@@ -580,7 +596,6 @@ class Exp_Informer(Exp_Basic):
             self.writer.add_scalar(tags[5], test_score[1], epoch)
             self.writer.add_scalar(tags[6], test_score[2], epoch)
             self.writer.add_scalar(tags[7], test_score[3], epoch)
-
             # log metrics to wandb
             # wandb.log({"test_loss": test_loss, "train_loss": train_loss})
 
@@ -594,53 +609,117 @@ class Exp_Informer(Exp_Basic):
         # wandb.finish()
         best_model_path = path + '/' + 'checkpoint.pth'
         self.model.load_state_dict(torch.load(best_model_path))
-
         return self.model
 
     def tune_test(self, setting):
         tune_test_data, tune_test_loader = self._get_data(flag='tune_test') # get fine tune test dataset
+        criterion = self._select_criterion()
+
         self.model.eval()
+        with torch.no_grad():
+            preds = []
+            trues = []
+            total_loss=[]
+            # 230809: TS score
+            tp = 0
+            tn = 0
+            fp = 0
+            fn = 0
+            th1 = 0.5
+            th2 = 0.5
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, class_label) in enumerate(tune_test_loader):
+                pred, true = self._process_one_batch(
+                    tune_test_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
+                preds.append(pred.detach().cpu().numpy())
+                trues.append(true.detach().cpu().numpy())
+                loss_type = 'mse'
+                if (loss_type == 'mse'):
+                    loss = criterion(pred.detach().cpu(),
+                                     true.detach().cpu())  # to cpu due to no need to update parameter in validation
+                    loss = loss.mean(dim=1)
+                    loss = loss.mean(dim=1)
+                    # loss = loss.mean()
 
-        preds = []
-        trues = []
+                    # # weighted MSE loss
+                    weight = class_label.to(torch.device('cpu'))
+                    weighted_loss = weight * loss
+                    loss = weighted_loss.mean()
+                if (loss_type == 'dilate'):
+                    alpha = 0.5
+                    gamma = 0.001
+                    size_pred = pred.shape
+                    for loss_i in range(size_pred[0]):
+                        tmp_loss, loss_shape, loss_temporal = dilate_loss(
+                            pred[loss_i].reshape(1, size_pred[1], size_pred[2]).detach().cpu(),
+                            true[loss_i].reshape(1, size_pred[1], size_pred[2]).detach().cpu(), alpha, gamma,
+                            torch.device('cpu'))
+                        tmp_loss = tmp_loss.unsqueeze(0)
+                        if loss_i == 0:
+                            loss = tmp_loss
+                        else:
+                            loss = torch.cat((loss, tmp_loss))
+                    # weighted DILATE loss
+                    weight = class_label.to(torch.device('cpu'))
+                    # weight=torch.ones(size_pred[0]).to(self.device)
+                    weighted_loss = weight * loss
+                    loss = weighted_loss.mean()
 
-        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, class_label) in enumerate(tune_test_loader):
-            pred, true = self._process_one_batch(
-                tune_test_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
+                total_loss.append(loss)
+                temp_score = Score(pred.detach().cpu(), true.detach().cpu(), th1, th2)
+                tp = temp_score[0] + tp
+                fp = temp_score[1] + fp
+                fn = temp_score[2] + fn
+                tn = temp_score[3] + tn
 
-            preds.append(pred.detach().cpu().numpy())
-            trues.append(true.detach().cpu().numpy())
+            preds = np.array(preds)
+            trues = np.array(trues)
 
-        preds = np.array(preds)
-        trues = np.array(trues)
+            print('test shape:', preds.shape, trues.shape)
+            preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
+            trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
+            pred_plt = preds[::trues.shape[-2], :, :]
+            pred_plt = pred_plt.reshape(-1, 1)
+            true_plt = trues[::trues.shape[-2], :, :]
+            true_plt = true_plt.reshape(-1, 1)
+            fig, ax = plt.subplots(2, 1, sharey='all', figsize=(18, 6), dpi=100)
+            plt.subplot(211)
+            plt.plot(pred_plt)
+            plt.subplot(212)
+            plt.plot(true_plt)
+            self.writer.add_figure(tag='Final prediction results', figure=fig)
 
-        print('test shape:', preds.shape, trues.shape)
-        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-        trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-        pred_plt = preds[::trues.shape[-2], :, :]
-        pred_plt = pred_plt.reshape(-1, 1)
-        true_plt = trues[::trues.shape[-2], :, :]
-        true_plt = true_plt.reshape(-1, 1)
-        fig = plt.figure(1, figsize=(8, 6))
-        plt.subplot(211)
-        plt.plot(pred_plt)
-        plt.subplot(212)
-        plt.plot(true_plt)
-        self.writer.add_figure(tag='Final prediction results', figure=fig)
-        # result save
-        folder_path = './results/' + setting + '/'
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
+            total_loss = np.average(total_loss)
+            ts = tp / (tp + fp + fn)
+            far = 0 if (tp + fp) == 0 else fp / (tp + fp)
+            acc = (tp + tn) / (tp + tn + fp + fn)
+            pod = tp / (tp + fn)
+            hss = 2 * (tp * tn - fp * fn) / ((tp + fn) * (fn + tn) + (tp + fp) * (fp + tn))
+            test_score = [acc, pod, far, ts, hss]
+            self.writer.add_hparams({'learning rate': self.args.learning_rate,
+                                     'seq_len':self.args.seq_len,
+                                     'pred_len':self.args.pred_len,
+                                     'label_len': self.args.label_len,
+                                     'd_model': self.args.d_model,
+                                     'e_layers': self.args.e_layers,
+                                     'd_layers': self.args.d_layers,
+                                     'train_epochs':self.args.train_epochs,
+                                     'batch_size':self.args.batch_size,
+                                     'dropout':self.args.dropout,
+                                     },{'hparm/pod':test_score[1]},run_name='./hp_params')
+            # result save
+            folder_path = './results/' + setting + '/'
+            if not os.path.exists(folder_path):
+                os.makedirs(folder_path)
 
-        mae, mse, rmse, mape, mspe = metric(preds, trues)
+            mae, mse, rmse, mape, mspe = metric(preds, trues)
 
-        print('mse:{}, mae:{}'.format(mse, mae))
+            print('mse:{}, mae:{}'.format(mse, mae))
 
-        # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        # np.save(folder_path + 'pred.npy', preds)
-        # np.save(folder_path + 'true.npy', trues)
-        # add code 7/8
-        # np.save(folder_path+'batch_x.npy', batch_xs)
+            # np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
+            # np.save(folder_path + 'pred.npy', preds)
+            # np.save(folder_path + 'true.npy', trues)
+            # add code 7/8
+            # np.save(folder_path+'batch_x.npy', batch_xs)
 
         return
 
