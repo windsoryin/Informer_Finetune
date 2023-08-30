@@ -1,0 +1,8 @@
+*.pyc
+__pycache__/
+results/
+checkpoints/
+#data/*.csv
+wandb/
+runs/
+runs_FT/
