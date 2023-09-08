@@ -1,4 +1,4 @@
-from data.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred,Dataset_Finetune
+from data.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Dataset_Custom, Dataset_Pred,Dataset_Finetune,Dataset_Finetune_pred
 from exp.exp_basic import Exp_Basic
 from models.model import Informer, InformerStack
 
@@ -22,7 +22,7 @@ from loss.dilate_loss import dilate_loss
 from torch.utils.tensorboard import SummaryWriter
 import wandb
 import matplotlib.pyplot as plt
-
+import pandas as pd
 
 warnings.filterwarnings('ignore')
 
@@ -122,7 +122,7 @@ class Exp_Informer(Exp_Basic):
             Data = Dataset_Finetune
         elif flag=='pred':
             shuffle_flag = False; drop_last = False; batch_size = 1; freq=args.detail_freq
-            Data = Dataset_Pred
+            Data = Dataset_Finetune_pred
         else:
             shuffle_flag = True; drop_last = True; batch_size = args.batch_size; freq=args.freq
         data_set = Data(
@@ -723,6 +723,62 @@ class Exp_Informer(Exp_Basic):
 
         return
 
+    def tune_predict(self, setting, load=True):
+        pred_data, pred_loader = self._get_data(flag='pred')
+        criterion = self._select_criterion()
+        finetune=1  # choose fintune model or original model
+        if load:
+            path = os.path.join(self.args.checkpoints, setting)
+            if finetune:
+                path = path + '/' + 'finetune' # set finetune path
+            best_model_path = path + '/' + 'checkpoint.pth'
+            self.model.load_state_dict(torch.load(best_model_path))
+        self.model.eval()
+
+        preds = []
+        trues = []
+
+        for i, (batch_x, batch_y, batch_x_mark, batch_y_mark,class_label) in enumerate(pred_loader):
+            pred, true = self._process_one_batch(
+                pred_data, batch_x, batch_y, batch_x_mark, batch_y_mark)
+            preds.append(pred.detach().cpu().numpy())
+            trues.append(true.detach().cpu().numpy())
+
+        preds = np.array(preds)
+        trues = np.array(trues)
+
+
+        print('test shape:', preds.shape, trues.shape)
+        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
+        trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
+        pred_plt = preds[::trues.shape[-2], :, :]
+        pred_plt = pred_plt.reshape(-1, 1)
+        true_plt = trues[::trues.shape[-2], :, :]
+        true_plt = true_plt.reshape(-1, 1)
+        # read date array from file
+        df_raw = pd.read_csv(os.path.join(self.args.root_path,
+                                          self.args.data_path))
+        pred_idx = df_raw[df_raw['date'] >= '2023/8/01 0:00'].index[0]
+        df_raw = df_raw.drop(df_raw.index[0:pred_idx])
+        date_array=df_raw['date'].to_numpy()
+        date_array = [datetime.strptime(d, '%Y/%m/%d %H:%M') for d in date_array]
+        # plot the figure
+        fig, ax = plt.subplots(2, 1, sharey='all', figsize=(18, 6), dpi=100)
+        plt.subplot(211)
+        plt.plot(date_array[0:pred_plt.shape[0]],pred_plt)
+        plt.subplot(212)
+        plt.plot(date_array[0:pred_plt.shape[0]],true_plt)
+        plt.show(block=True)
+        # result save
+        folder_path = './results/' + setting + '/'
+        if not os.path.exists(folder_path):
+            os.makedirs(folder_path)
+
+        now1 = datetime.now()
+        np.save(folder_path + 'real_prediction_{}.npy'.format(now1), preds)
+
+        return
+
     def _process_one_batch(self, dataset_object, batch_x, batch_y, batch_x_mark, batch_y_mark):
         batch_x = batch_x.float().to(self.device)
         batch_y = batch_y.float()
@@ -754,3 +810,5 @@ class Exp_Informer(Exp_Basic):
         batch_y = batch_y[:,-self.args.pred_len:,f_dim:].to(self.device)
 
         return outputs, batch_y
+
+
